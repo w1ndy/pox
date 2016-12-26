@@ -48,8 +48,13 @@ import threading
 import random
 import hashlib
 import base64
+import json
+
+from time import time
 
 from pox.core import core
+from pox.lib.util import dpid_to_str, str_to_dpid
+from pox.lib.addresses import IPAddr, IPAddr6, EthAddr
 
 import os
 import posixpath
@@ -172,20 +177,25 @@ class CoreHandler (SplitRequestHandler):
       self.wfile.write(_favicon)
 
   def send_info (self, is_get = False):
-    r = "<html><head><title>POX</title></head>\n"
-    r += "<body>\n<h1>POX Webserver</h1>\n<h2>Components</h2>\n"
-    r += "<ul>"
-    for k in sorted(core.components):
-      v = core.components[k]
-      r += "<li>%s - %s</li>\n" % (cgi.escape(str(k)), cgi.escape(str(v)))
-    r += "</ul>\n\n<h2>Web Prefixes</h2>"
-    r += "<ul>"
-    m = [map(cgi.escape, map(str, [x[0],x[1],x[3]]))
-         for x in self.args.matches]
-    m.sort()
-    for v in m:
-      r += "<li><a href='{0}'>{0}</a> - {1} {2}</li>\n".format(*v)
-    r += "</ul></body></html>\n"
+    r = {}
+    nodes = []
+    for item in core.visualizer.hosts:
+      nodes.append({"id": item})
+    for item in core.visualizer.switches:
+      nodes.append({"id": item, "is_switch": '1'})
+    edges = []
+    for u in core.visualizer.links:
+      for v in core.visualizer.links[u]:
+        if u < v:
+          edges.append({
+            "source": u, 
+            "target": v, 
+            "id": '%d' % core.visualizer.links[u][v],
+            "speed": '%.2f' % core.visualizer.speed[core.visualizer.links[u][v]]
+            })
+    r['nodes'] = nodes
+    r['edges'] = edges
+    r = json.dumps(r, indent = 4, separators = (',', ': '))
 
     self.send_response(200)
     self.send_header("Content-type", "text/html")
@@ -194,6 +204,121 @@ class CoreHandler (SplitRequestHandler):
     if is_get:
       self.wfile.write(r)
 
+class NodeHandler (SplitRequestHandler):
+  """
+  A default page to say hi from POX.
+  """
+  def do_GET (self):
+    """Serve a GET request."""
+    self.do_content(True)
+
+  def do_HEAD (self):
+    """Serve a HEAD request."""
+    self.do_content(False)
+
+  def do_content (self, is_get):
+    self.send_info(is_get)
+
+  def send_favicon (self, is_get = False):
+    self.send_response(200)
+    self.send_header("Content-type", "image/gif")
+    self.send_header("Content-Length", str(len(_favicon)))
+    self.end_headers()
+    if is_get:
+      self.wfile.write(_favicon)
+
+  def send_info (self, is_get = False):
+    r = {}
+    hwaddr = self.path[1:]
+    if hwaddr in core.visualizer.hosts:
+      entry = core.host_tracker.entryByMAC[EthAddr(hwaddr)]
+      if entry:
+        r['connects'] = [{
+          "port": '%d' % entry.port,
+          "link_id": '%d' % core.visualizer.links[hwaddr][dpid_to_str(entry.dpid)],
+          "to": dpid_to_str(entry.dpid)
+          }]
+        if len(entry.ipAddrs) > 0:
+          r['ip_addr'] = str(entry.ipAddrs.keys()[0])
+        else:
+          r['ip_addr'] = ''
+    elif hwaddr in core.visualizer.switches:
+      r['is_switch'] = '1'
+      r['connects'] = []
+      for port in core.visualizer.ports[hwaddr]:
+        to = core.visualizer.ports[hwaddr][port]
+        r['connects'].append({
+          "port": '%d' % port,
+          "link_id": '%d' % core.visualizer.links[hwaddr][to],
+          "to": to
+          })
+    r = json.dumps(r, indent = 4, separators = (',', ': '))
+
+    self.send_response(200)
+    self.send_header("Content-type", "text/html")
+    self.send_header("Content-Length", str(len(r)))
+    self.end_headers()
+    if is_get:
+      self.wfile.write(r)
+
+class LinkHandler (SplitRequestHandler):
+  """
+  A default page to say hi from POX.
+  """
+  def do_GET (self):
+    """Serve a GET request."""
+    self.do_content(True)
+
+  def do_HEAD (self):
+    """Serve a HEAD request."""
+    self.do_content(False)
+
+  def do_content (self, is_get):
+    self.send_info(is_get)
+
+  def send_favicon (self, is_get = False):
+    self.send_response(200)
+    self.send_header("Content-type", "image/gif")
+    self.send_header("Content-Length", str(len(_favicon)))
+    self.end_headers()
+    if is_get:
+      self.wfile.write(_favicon)
+
+  def send_info (self, is_get = False):
+    r = {}
+    link_id = 0
+    try:
+      link_id = int(self.path[1:])
+      if not link_id in core.visualizer.link_age:
+        raise ValueError
+    except ValueError:
+      print ' ! Web Interface: Bad link id', self.path[1:]
+      r = '{}'
+      self.send_response(200)
+      self.send_header("Content-type", "text/html")
+      self.send_header("Content-Length", str(len(r)))
+      self.end_headers()
+      if is_get:
+        self.wfile.write(r)
+      return
+
+    r["age"] = '%.1f' % (time() - core.visualizer.link_age[link_id])
+    r["avg_latency"] = '%.3f' % core.visualizer.probemgr.get_avg_latency(link_id)
+    r["packet_loss"] = '%.1f' % core.visualizer.probemgr.get_packet_loss_percentage(link_id)
+    if link_id in core.visualizer.bytes_tot_sample:
+      r["total_traffic"] = '%d' % core.visualizer.bytes_tot_sample[link_id]
+    else:
+      r["total_traffic"] = '0'
+    r["source"] = core.visualizer.source[link_id]
+    r["target"] = core.visualizer.target[link_id]
+    r = json.dumps(r, indent = 4, separators = (',', ': '))
+
+    self.send_response(200)
+    self.send_header("Content-type", "text/html")
+    self.send_header("Content-Length", str(len(r)))
+    self.end_headers()
+    if is_get:
+      self.wfile.write(r)
 
 class StaticContentHandler (SplitRequestHandler, SimpleHTTPRequestHandler):
   # We slightly modify SimpleHTTPRequestHandler to serve from given
@@ -449,6 +574,8 @@ def launch (address='', port=8000, static=False):
   httpd = SplitThreadedServer((address, int(port)), SplitterRequestHandler)
   core.register("WebServer", httpd)
   httpd.set_handler("/", CoreHandler, httpd, True)
+  httpd.set_handler("/node/", NodeHandler, httpd, True)
+  httpd.set_handler("/link/", LinkHandler, httpd, True)
   #httpd.set_handler("/foo", StaticContentHandler, {'root':'.'}, True)
   #httpd.set_handler("/f", StaticContentHandler, {'root':'pox'}, True)
   #httpd.set_handler("/cgis", SplitCGIRequestHandler, "pox/web/www_root")

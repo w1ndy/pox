@@ -356,6 +356,8 @@ class host_tracker (EventMixin):
 
     # Learn or update dpid/port/MAC info
     macEntry = self.getMacEntry(packet.src)
+    if str(packet.dst)[:5] == '6c:3b':
+      return
     if macEntry is None:
       # there is no known host by that MAC
       # should we raise a NewHostFound event (at the end)?
